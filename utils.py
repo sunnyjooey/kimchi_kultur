@@ -11,9 +11,9 @@ import pandas as pd
 import requests
 
 # ── paths ──────────────────────────────────────────────────────────────────
-ROOT = Path(__file__).parent
-DATA_DIR = "/content/drive/MyDrive/Colab_Notebooks/kimchi_kultur_project/data"
-DATA_DIR.mkdir(exist_ok=True)
+ROOT = Path("/content/drive/MyDrive/Colab_Notebooks/kimchi_kultur_project")
+DATA_DIR = ROOT / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
