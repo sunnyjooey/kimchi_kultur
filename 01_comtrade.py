@@ -38,10 +38,12 @@ import time
 import pandas as pd
 import comtradeapicall
 from utils import log, save_csv, DATA_DIR
-from google.colab import userdata
 import os
 
-os.environ['COMTRADE_KEY'] = userdata.get('COMTRADE_KEY')
+# get key
+COMTRADE_KEY = os.getenv("COMTRADE_KEY")
+if not COMTRADE_KEY:
+    raise ValueError("COMTRADE_KEY environment variable not set")
 
 HS_CODE      = "200599"      # kimchi — "other prepared/preserved vegetables, not frozen"
                              # Full 10-digit HSK: 2005991000

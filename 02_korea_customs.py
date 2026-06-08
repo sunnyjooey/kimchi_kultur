@@ -62,10 +62,13 @@ from pathlib import Path
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from utils import log, save_csv, DATA_DIR
-from google.colab import userdata
 import os
 
-os.environ['CUSTOMS_KEY'] = userdata.get('CUSTOMS_KEY')
+
+# get key
+COMTRADE_KEY = os.getenv("CUSTOMS_KEY")
+if not COMTRADE_KEY:
+    raise ValueError("CUSTOMS_KEY environment variable not set")
 
 BASE_URL    = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
 HS_CODE     = "200599"       # kimchi — "other prepared/preserved vegetables" (6-digit prefix)

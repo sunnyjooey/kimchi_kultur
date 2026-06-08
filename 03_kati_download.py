@@ -51,10 +51,13 @@ import requests
 import pandas as pd
 from pathlib import Path
 from utils import log, save_csv, DATA_DIR
-from google.colab import userdata
 import os
 
-os.environ['KATI_KEY'] = userdata.get('KATI_KEY')
+
+# get key
+COMTRADE_KEY = os.getenv("KATI_KEY")
+if not COMTRADE_KEY:
+    raise ValueError("KATI_KEY environment variable not set")
 
 BASE_URL   = "https://api.odcloud.kr/api"
 PER_PAGE   = 1000   # fetch up to 1000 rows per page (well above total product count)
