@@ -1,9 +1,6 @@
 # Stream 1 — data pull dependencies
 # Install with: pip install -r requirements.txt
 
-# !! pin urllib3 to v1.x — v2 breaks pytrends and some requests integrations
-urllib3<2
-
 comtradeapicall>=1.3.0
 pandas>=2.0.0
 requests>=2.31.0
