@@ -142,9 +142,10 @@ def fetch_all():
                 "end_date":   f"{year}1231",
                 "sort":       "oldest",
                 "page":       page,
+                "api-key":    NYT_KEY,   # query param (Apigee gateway expects this)
             }
             headers = {
-                "X-Api-Key":  NYT_KEY,   # header form
+                "X-Api-Key":  NYT_KEY,   # header form (belt and braces)
             }
 
             try:
