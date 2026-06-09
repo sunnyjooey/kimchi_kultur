@@ -66,8 +66,8 @@ import os
 
 
 # get key
-COMTRADE_KEY = os.getenv("CUSTOMS_KEY")
-if not COMTRADE_KEY:
+CUSTOMS_KEY = os.getenv("CUSTOMS_KEY")
+if not CUSTOMS_KEY:
     raise ValueError("CUSTOMS_KEY environment variable not set")
 
 BASE_URL    = "https://apis.data.go.kr/1220000/nitemtrade/getNitemtradeList"
@@ -195,17 +195,6 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    if CUSTOMS_KEY == "YOUR_KEY_HERE":
-        print("""
-┌──────────────────────────────────────────────────────────────┐
-│  API KEY REQUIRED                                            │
-│                                                              │
-│  Apply at: https://www.data.go.kr/data/15100475/openapi.do  │
-│  Then:  export CUSTOMS_KEY="your_key_here"                   │
-│  or paste it into CUSTOMS_KEY at the top of this file.      │
-└──────────────────────────────────────────────────────────────┘
-""")
-        return
 
     end_ym = last_complete_month()
     chunks = yearly_chunks(START_YM, end_ym)

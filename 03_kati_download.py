@@ -55,8 +55,8 @@ import os
 
 
 # get key
-COMTRADE_KEY = os.getenv("KATI_KEY")
-if not COMTRADE_KEY:
+KATI_KEY = os.getenv("KATI_KEY")
+if not KATI_KEY:
     raise ValueError("KATI_KEY environment variable not set")
 
 BASE_URL   = "https://api.odcloud.kr/api"
