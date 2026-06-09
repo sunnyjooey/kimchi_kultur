@@ -142,11 +142,12 @@ def fetch_all():
                 "end_date":   f"{year}1231",
                 "sort":       "oldest",
                 "page":       page,
-                "api-key":    NYT_KEY,
             }
+            headers = {"X-Api-Key": NYT_KEY}
 
             try:
-                r = requests.get(BASE_URL, params=params, timeout=30)
+                r = requests.get(BASE_URL, params=params,
+                                 headers=headers, timeout=30)
 
                 if r.status_code == 429:
                     log.warning("Rate limited (429) — waiting 60s then retrying.")
