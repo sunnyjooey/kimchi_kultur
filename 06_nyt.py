@@ -143,7 +143,9 @@ def fetch_all():
                 "sort":       "oldest",
                 "page":       page,
             }
-            headers = {"X-Api-Key": NYT_KEY}
+            headers = {
+                "X-Api-Key":  NYT_KEY,   # header form
+            }
 
             try:
                 r = requests.get(BASE_URL, params=params,
