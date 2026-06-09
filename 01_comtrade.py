@@ -52,10 +52,10 @@ REPORTER     = "410"         # Korea
 FLOW         = "X"           # exports
 FREQ         = "A"           # annual
 START_YEAR   = 2000
-END_YEAR     = 2024
+END_YEAR     = 2025
 
 # Comtrade annual API: max 12-year window per call
-CHUNK_YEARS  = 12
+CHUNK_YEARS  = 10
 
 
 def year_chunks(start: int, end: int, size: int):
