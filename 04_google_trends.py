@@ -183,31 +183,6 @@ def fetch_country_series(pt: TrendReq, country_code: str) -> pd.DataFrame:
     return df
 
 
-def fetch_by_country_snapshot(pt: TrendReq) -> pd.DataFrame:
-    """Interest by country (5yr snapshot)."""
-    log.info("Fetching interest-by-country snapshot (5yr)…")
-
-    def _call():
-        pt.build_payload(
-            kw_list=  [KEYWORD],
-            timeframe="today 5-y",
-            geo=      "",
-            gprop=    "",
-        )
-        return pt.interest_by_region(resolution="COUNTRY", inc_low_vol=True)
-
-    df = _with_retry(_call, "country snapshot")
-    if df is None or df.empty:
-        log.warning("Country snapshot: empty or failed.")
-        return pd.DataFrame()
-
-    df = df.reset_index()
-    df.columns = ["country", "interest"]
-    df = df[df["interest"] > 0].sort_values("interest", ascending=False)
-    log.info(f"Country snapshot: {len(df)} countries")
-    return df
-
-
 def fetch_related_queries(pt: TrendReq) -> pd.DataFrame:
     """Top & rising related queries."""
     log.info("Fetching related queries…")
@@ -300,17 +275,6 @@ def main():
         elif not country_frames:
             log.warning("No country series data collected.")
 
-    # ── 3. country snapshot ────────────────────────────────────────────────────
-    fname_snapshot = "trends_by_country_snapshot.csv"
-    if already_done(fname_snapshot):
-        log.info("  Country snapshot: using existing file.")
-    else:
-        snapshot = fetch_by_country_snapshot(pt)
-        if not snapshot.empty:
-            save_csv(snapshot, fname_snapshot, "Google Trends country snapshot (5yr)")
-            print(f"\nTop 10 countries by search interest:\n{snapshot.head(10).to_string(index=False)}")
-        else:
-            log.warning("Country snapshot failed or returned nothing.")
 
     # ── 4. related queries ─────────────────────────────────────────────────────
     fname_related = "trends_related_queries.csv"
