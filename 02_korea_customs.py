@@ -62,7 +62,6 @@ from pathlib import Path
 from datetime import date
 from dateutil.relativedelta import relativedelta
 from utils import log, save_csv, DATA_DIR
-import os
 
 
 # get key

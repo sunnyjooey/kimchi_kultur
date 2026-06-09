@@ -38,7 +38,6 @@ import time
 import pandas as pd
 import comtradeapicall
 from utils import log, save_csv, DATA_DIR
-import os
 
 # get key
 COMTRADE_KEY = os.getenv("COMTRADE_KEY")

@@ -51,7 +51,6 @@ import requests
 import pandas as pd
 from pathlib import Path
 from utils import log, save_csv, DATA_DIR
-import os
 
 
 # get key
