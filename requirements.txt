@@ -7,4 +7,6 @@ requests>=2.31.0
 python-dateutil>=2.8.2
 pytrends>=4.9.2
 openpyxl>=3.1.0         # for reading .xlsx files from KATI
-beautifulsoup4>=4.12.0  # for scraping data.go.kr download links (script 03)
+
+# Stream 2 — media classification
+anthropic>=0.109.0      # for 05_classify_articles.py
