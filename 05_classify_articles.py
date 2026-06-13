@@ -3,12 +3,9 @@
 ───────────────────────
 LLM-based relevance and framing classifier for kimchi media articles.
 
-Classifies each article on three dimensions:
+Classifies each article on two dimensions:
   1. kimchi_centrality : primary | secondary | incidental
   2. korea_subject      : Y | N
-  3. article_type       : recipe | health_nutrition | culture_kwave |
-                          geopolitics_trade | travel | general_food |
-                          other
 
 Works on both Guardian (has full body_text) and NYT (abstracts only).
 Uses different context fields per source to give the model the best signal.
@@ -26,7 +23,7 @@ data/guardian_classified.csv
 data/nyt_classified.csv
 
 Each output adds columns:
-  kimchi_centrality, korea_subject, article_type, classifier_confidence,
+  kimchi_centrality, korea_subject, classifier_confidence,
   classifier_reasoning, classifier_model, classified_at
 
 Setup
@@ -69,15 +66,11 @@ MAX_RETRIES   = 3
 
 VALID_CENTRALITY  = {"primary", "secondary", "incidental"}
 VALID_KOREA       = {"Y", "N"}
-VALID_TYPES       = {
-    "recipe", "health_nutrition", "culture_kwave",
-    "geopolitics_trade", "travel", "general_food", "other"
-}
 
 # ── prompts ─────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a media analyst classifying news and editorial articles
-that mention kimchi. Your job is to assess three things about each article.
+that mention kimchi. Your job is to assess two things about each article.
 
 CLASSIFICATIONS:
 
@@ -96,21 +89,10 @@ CLASSIFICATIONS:
        or globalised context (e.g. a Western restaurant review, a fermentation
        health piece, a recipe from a non-Korean chef, a cultural reference)
 
-3. article_type — pick the single best fit:
-   recipe            — cooking instructions or recipe-led content
-   health_nutrition  — fermentation, gut health, nutrition, probiotics framing
-   culture_kwave     — K-pop, K-drama, Hallyu, Korean Wave, Korean cultural export
-   geopolitics_trade — trade disputes, export statistics, diplomatic incidents,
-                       food sovereignty (e.g. China-Korea kimchi dispute)
-   travel            — travel writing, restaurant reviews in Korea or Korean districts
-   general_food      — food journalism, trend pieces, restaurant reviews (non-travel)
-   other             — doesn't fit any of the above
-
 Return ONLY a JSON object with exactly these keys:
 {
   "kimchi_centrality": "primary" | "secondary" | "incidental",
   "korea_subject": "Y" | "N",
-  "article_type": one of the seven types above,
   "confidence": "high" | "medium" | "low",
   "reasoning": "one sentence explaining your classification"
 }
@@ -176,8 +158,6 @@ def classify_one(client: anthropic.Anthropic, prompt: str) -> dict:
                 raise ValueError(f"Bad centrality: {parsed.get('kimchi_centrality')}")
             if parsed.get("korea_subject") not in VALID_KOREA:
                 raise ValueError(f"Bad korea_subject: {parsed.get('korea_subject')}")
-            if parsed.get("article_type") not in VALID_TYPES:
-                raise ValueError(f"Bad article_type: {parsed.get('article_type')}")
 
             return parsed
 
@@ -187,7 +167,6 @@ def classify_one(client: anthropic.Anthropic, prompt: str) -> dict:
                 return {
                     "kimchi_centrality": "incidental",
                     "korea_subject": "N",
-                    "article_type": "other",
                     "confidence": "low",
                     "reasoning": f"Classification failed after {MAX_RETRIES} attempts: {e}",
                 }
@@ -239,7 +218,7 @@ def classify_df(
     out = df.copy()
     valid_results = [r for r in results if r is not None]
 
-    for col in ["kimchi_centrality", "korea_subject", "article_type",
+    for col in ["kimchi_centrality", "korea_subject",
                 "confidence", "reasoning", "classifier_model", "classified_at"]:
         out[col] = [r.get(col) if r else None for r in results]
 
@@ -294,7 +273,7 @@ def run_source(
         df = existing   # use checkpoint df (already has partial results)
 
     # add output columns if missing
-    for col in ["kimchi_centrality", "korea_subject", "article_type",
+    for col in ["kimchi_centrality", "korea_subject", 
                 "confidence", "reasoning", "classifier_model", "classified_at"]:
         if col not in df.columns:
             df[col] = None
@@ -312,7 +291,6 @@ def run_source(
 
         df.at[idx, "kimchi_centrality"]  = result.get("kimchi_centrality")
         df.at[idx, "korea_subject"]      = result.get("korea_subject")
-        df.at[idx, "article_type"]       = result.get("article_type")
         df.at[idx, "confidence"]         = result.get("confidence")
         df.at[idx, "reasoning"]          = result.get("reasoning")
         df.at[idx, "classifier_model"]   = MODEL
@@ -334,7 +312,6 @@ def run_source(
     print("\nKorea subject:")
     print(df["korea_subject"].value_counts().to_string())
     print("\nArticle type:")
-    print(df["article_type"].value_counts().to_string())
     print("\nConfidence:")
     print(df["confidence"].value_counts().to_string())
 
