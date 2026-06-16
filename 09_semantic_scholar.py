@@ -48,7 +48,11 @@ S2_KEY = os.getenv("SEMANTIC_SCHOLAR_KEY", "")
 BASE_URL  = "https://api.semanticscholar.org/graph/v1/paper/search"
 QUERY     = "kimchi"
 PAGE_SIZE = 100        # max allowed by /paper/search
-SLEEP_SEC = 3.1 if not S2_KEY else 1.1   # unauth: ~1 req/3s; keyed: ~1 req/s
+SLEEP_SEC = 6.0 if not S2_KEY else 1.1   # unauthenticated tier is a SHARED pool
+                                          # across all users worldwide without a
+                                          # key — 100/5min nominal limit is often
+                                          # already consumed by others. Slower
+                                          # pacing reduces 403/429 hits.
 MAX_RETRIES = 5
 
 FIELDS = ",".join([
@@ -75,19 +79,32 @@ def fetch_page(offset: int) -> dict:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = requests.get(BASE_URL, params=params, headers=headers, timeout=30)
+
             if r.status_code == 429:
                 wait = 10 * attempt
                 log.warning(f"  Rate limited (429). Waiting {wait}s "
                            f"(attempt {attempt}/{MAX_RETRIES})…")
                 time.sleep(wait)
                 continue
-            r.raise_for_status()
+
+            if r.status_code != 200:
+                # Surface the actual error instead of failing silently.
+                # 403 is common on the shared unauthenticated tier when
+                # traffic from other users has exhausted the pool.
+                log.error(f"  HTTP {r.status_code} on offset {offset}: "
+                         f"{r.text[:300]}")
+                if r.status_code in (401, 403) and attempt < MAX_RETRIES:
+                    wait = 15 * attempt
+                    log.warning(f"  Retrying in {wait}s "
+                               f"(attempt {attempt}/{MAX_RETRIES})…")
+                    time.sleep(wait)
+                    continue
+                return {}
+
             return r.json()
-        except requests.HTTPError as e:
-            log.warning(f"  HTTP error on offset {offset}: {e}")
-            return {}
-        except Exception as e:
-            log.warning(f"  Request failed on offset {offset}: {e}")
+
+        except requests.exceptions.RequestException as e:
+            log.warning(f"  Request exception on offset {offset}: {e}")
             time.sleep(5)
 
     log.error(f"  Offset {offset}: exhausted retries.")
@@ -160,7 +177,16 @@ def parse(papers: list[dict]) -> pd.DataFrame:
 
 def main():
     log.info(f"Semantic Scholar — query: '{QUERY}'")
-    log.info(f"Rate limit: {'keyed (~1 req/s)' if S2_KEY else 'unauthenticated (~100/5min)'}")
+    if not S2_KEY:
+        log.warning(
+            "No API key set. The unauthenticated tier is a SHARED pool across "
+            "ALL users worldwide without a key, so it's often already exhausted "
+            "by other traffic — this commonly shows up as 403s with no clear "
+            "cause. A free key removes this and gives you a dedicated 1 req/s. "
+            "Register at: https://www.semanticscholar.org/product/api#api-key "
+            "then: export SEMANTIC_SCHOLAR_KEY='your-key-here'"
+        )
+    log.info(f"Rate limit: {'keyed (~1 req/s)' if S2_KEY else 'unauthenticated (shared pool)'}")
 
     papers = fetch_all()
     if not papers:
