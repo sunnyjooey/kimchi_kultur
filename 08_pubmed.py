@@ -33,6 +33,24 @@ Two-step E-utilities flow:
   2. efetch  — fetch full records (title/abstract/MeSH/journal/date) for
                those PMIDs in batches of up to 200
 
+Title/abstract truncation fix
+──────────────────────────────
+PubMed titles and abstracts often contain nested XML tags — italicized
+species names (<i>Lactobacillus plantarum</i>), chemical formula sub/
+superscripts, gene symbols, etc. Using .text or .findtext() on these
+elements only returns the text BEFORE the first nested tag, silently
+truncating results like "Functional Genome Annotation of " (missing the
+italicized species name that follows). This script uses itertext() to
+walk all nested text instead.
+
+Relevance filtering
+─────────────────────
+A plain "kimchi" query lets PubMed's automatic term mapping pull in papers
+where kimchi is only mentioned in passing (e.g. a citation, a footnote, or
+via MeSH-based query expansion) rather than papers actually about kimchi.
+This script uses "kimchi[tiab]" to restrict matches to the title or
+abstract fields only, which is a much stronger relevance signal.
+
 Output
 ──────
 data/pubmed_kimchi_papers.csv
@@ -53,7 +71,12 @@ PUBMED_KEY = os.getenv("PUBMED_KEY", "")   # optional — raises rate limit to 1
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 EFETCH_URL  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-QUERY        = "kimchi"
+QUERY        = "kimchi[tiab]"  # [tiab] = restrict to title/abstract only.
+                                # Plain "kimchi" lets PubMed's automatic term
+                                # mapping pull in tangentially related papers
+                                # (e.g. via MeSH expansion or citation linking)
+                                # where "kimchi" appears only in passing —
+                                # not papers actually ABOUT kimchi.
 RETMAX_SEARCH = 10000     # max UIDs per esearch call
 FETCH_BATCH   = 200       # PMIDs per efetch call
 SLEEP_SEC     = 0.34 if not PUBMED_KEY else 0.11   # 3/s vs 10/s
@@ -131,11 +154,18 @@ def parse_efetch_xml(xml_content: bytes) -> list[dict]:
     for article in root.findall(".//PubmedArticle"):
         pmid = article.findtext(".//PMID", default="")
 
-        title = article.findtext(".//ArticleTitle", default="")
+        # Use itertext() to capture ALL text including inside nested tags
+        # like <i>, <sub>, <sup> — PubMed titles often italicize species
+        # names (e.g. "...annotation of <i>Lactobacillus plantarum</i>..."),
+        # and .text/.findtext() would silently truncate at the first nested tag.
+        title_el = article.find(".//ArticleTitle")
+        title = "".join(title_el.itertext()).strip() if title_el is not None else ""
 
         # abstract may have multiple <AbstractText> sections (e.g. Background/Methods/...)
+        # also use itertext() here for the same reason — abstracts can contain
+        # italicized terms, chemical formulas with <sub>/<sup>, etc.
         abstract_parts = [
-            (el.text or "") for el in article.findall(".//AbstractText")
+            "".join(el.itertext()) for el in article.findall(".//AbstractText")
         ]
         abstract = " ".join(p.strip() for p in abstract_parts if p).strip()
 
