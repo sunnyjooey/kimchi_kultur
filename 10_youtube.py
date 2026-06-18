@@ -9,7 +9,18 @@ Method   : search.list, one call per calendar year (publishedAfter/Before),
            order=date, fully paginated within each year before moving on.
            Then videos.list to attach view/like/comment counts per video.
 
-REVISION NOTE — fixes silent partial-year truncation
+REVISION NOTE 2 — quota errors can arrive as HTTP 429, not just 403
+─────────────────────────────────────────────────────────────────────
+In practice, YouTube returned the daily search quota error as HTTP 429
+("rateLimitExceeded" reason) rather than 403. The original revision only
+checked for status 403, so a 429 quota error fell through into the
+generic "partial_error" branch — exactly the kind of silent mislabeling
+this script is supposed to prevent. Fixed by checking the actual error
+reason in the response body (via _is_quota_error) rather than trusting
+a single status code, since Google is inconsistent about which of the
+two it returns for quota exhaustion.
+
+REVISION NOTE 1 — fixes silent partial-year truncation
 ──────────────────────────────────────────────────────
 An earlier version of this script could silently return a partial year's
 worth of results if a 403/quota error or other HTTP error interrupted
@@ -116,9 +127,34 @@ def build_client():
 
 
 class QuotaExceededError(Exception):
-    """Raised when search.list returns 403 — signals the caller to stop
-    the whole run rather than silently moving to the next year."""
+    """Raised when search.list reports quota exhaustion (HTTP 403 or 429 —
+    Google uses both depending on which limit was hit). Signals the caller
+    to stop the whole run rather than silently moving to the next year."""
     pass
+
+
+def _is_quota_error(e: HttpError) -> bool:
+    """
+    Google's API returns quota-exceeded errors as EITHER 403 or 429
+    depending on which limit was hit (daily quota vs. per-minute rate),
+    so checking status code alone is unreliable — confirmed in practice
+    when a 'Search Queries per day' quota error came back as 429, not 403.
+
+    This checks the actual error reason/content from the response body,
+    which is more dependable than the status code.
+    """
+    status = getattr(e.resp, "status", None)
+    if status not in (403, 429):
+        return False
+
+    quota_signals = ("quotaexceeded", "ratelimitexceeded", "userratelimitexceeded",
+                      "quota exceeded", "rate limit")
+    try:
+        error_text = e.content.decode("utf-8", errors="ignore").lower()
+    except Exception:
+        error_text = str(e).lower()
+
+    return any(signal in error_text for signal in quota_signals)
 
 
 def search_year(youtube, year: int) -> dict:
@@ -163,10 +199,13 @@ def search_year(youtube, year: int) -> dict:
             )
             response = request.execute()
         except HttpError as e:
-            if e.resp.status == 403:
+            if _is_quota_error(e):
                 # Quota exhausted — stop the ENTIRE run, not just this year.
                 # Returning partial results here would silently corrupt the
                 # year's count, which is exactly the bug this revision fixes.
+                # Note: Google returns either 403 OR 429 for quota errors
+                # depending on which limit was hit, so we check the error
+                # reason/content rather than trusting a single status code.
                 log.error(
                     f"  Quota exceeded on year {year} (page {pages_fetched + 1}): {e}\n"
                     f"  search.list daily cap (100/day) likely exhausted."
