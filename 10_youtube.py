@@ -6,8 +6,33 @@ signal, to complement Stream 2 (Guardian/NYT media) and Google Trends.
 
 Source   : YouTube Data API v3 (developers.google.com/youtube/v3)
 Method   : search.list, one call per calendar year (publishedAfter/Before),
-           order=date, paginated only if a year has >50 results.
+           order=date, fully paginated within each year before moving on.
            Then videos.list to attach view/like/comment counts per video.
+
+REVISION NOTE — fixes silent partial-year truncation
+──────────────────────────────────────────────────────
+An earlier version of this script could silently return a partial year's
+worth of results if a 403/quota error or other HTTP error interrupted
+pagination mid-year, with no way to tell a "complete" year from a
+"stopped early" one apart by looking at the output. This version fixes
+that by:
+  1. Tracking an explicit per-year status: "complete", "capped" (hit the
+     500-result ceiling), "partial_error" (stopped early on a non-quota
+     HTTP error), or "not_attempted" (quota ran out before reaching it).
+  2. Raising immediately on a 403 and DISCARDING that year's partial items
+     rather than keeping them — a year is either fully fetched or absent,
+     never half-counted.
+  3. Checkpointing progress to data/youtube_year_status.csv after every
+     year, so re-running the script after a quota reset automatically
+     resumes from where it left off instead of re-fetching completed
+     years (which would waste quota for no reason).
+  4. Writing the status + a human-readable note into
+     youtube_kimchi_yearly_volume.csv directly, so any downstream chart
+     or analysis can filter out unreliable years instead of trusting
+     video_count blindly.
+
+Run with --fresh to ignore the checkpoint and re-fetch every year from
+scratch (e.g. if you suspect the prior pull was corrupted some other way).
 
 IMPORTANT — quota design
 ─────────────────────────
@@ -24,9 +49,8 @@ your search.list budget before running — going over silently fails with a
 YouTube also caps any single query at roughly 500 total results before
 relevance degrades and pagination stops being reliable — splitting by year
 keeps each window's result count well under that ceiling for a niche term
-like "kimchi", but if a particular year returns close to 500, treat that
-year's count as a floor, not a precise total, and consider splitting it by
-month for a one-off re-run.
+like "kimchi", but if a particular year returns close to 500 ("capped"
+status), treat that year's count as a floor, not a precise total.
 
 Setup
 ─────
@@ -47,8 +71,14 @@ data/youtube_kimchi_videos.csv
            view_count, like_count, comment_count, duration_iso, url
 
 data/youtube_kimchi_yearly_volume.csv
-  Columns: year, video_count, total_views, total_likes, total_comments
-  (aggregated — this is the file you'll plot alongside trade/media/academic/trends)
+  Columns: year, video_count, total_views, total_likes, total_comments,
+           status, note
+  status is "complete", "capped", "partial_error", or "not_attempted" —
+  ALWAYS check this column before plotting video_count as a trend.
+
+data/youtube_year_status.csv
+  Checkpoint file — {year, status, note}. Safe to delete to force a full
+  re-fetch of all years on the next run (same effect as --fresh).
 """
 
 import os
@@ -85,11 +115,30 @@ def build_client():
     return build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
 
-def search_year(youtube, year: int) -> list[dict]:
+class QuotaExceededError(Exception):
+    """Raised when search.list returns 403 — signals the caller to stop
+    the whole run rather than silently moving to the next year."""
+    pass
+
+
+def search_year(youtube, year: int) -> dict:
     """
-    One search.list call (plus pagination only if needed) for videos
-    published in the given calendar year. Returns list of video metadata
-    dicts (snippet only — no statistics yet).
+    Walk every page for one calendar year before returning. Returns a dict:
+      {
+        "items": [...],          # video metadata collected (snippet only)
+        "status": "complete" | "partial_error" | "capped",
+        "pages_fetched": int,
+        "note": str,              # human-readable explanation of status
+      }
+
+    status meanings:
+      complete      — full year retrieved, nextPageToken exhausted normally,
+                       totalResults stayed under MAX_PER_YEAR
+      capped        — hit MAX_PER_YEAR; YouTube's reliable ceiling reached,
+                       so this is a floor, not an exact count
+      partial_error — pagination was interrupted by a non-quota HTTP error
+                       partway through the year; DO NOT treat len(items) as
+                       a real count for this year — re-run it specifically
     """
     published_after  = f"{year}-01-01T00:00:00Z"
     published_before = f"{year + 1}-01-01T00:00:00Z"
@@ -97,6 +146,8 @@ def search_year(youtube, year: int) -> list[dict]:
     items = []
     page_token = None
     pages_fetched = 0
+    status = "complete"
+    note = ""
 
     while True:
         try:
@@ -113,13 +164,27 @@ def search_year(youtube, year: int) -> list[dict]:
             response = request.execute()
         except HttpError as e:
             if e.resp.status == 403:
+                # Quota exhausted — stop the ENTIRE run, not just this year.
+                # Returning partial results here would silently corrupt the
+                # year's count, which is exactly the bug this revision fixes.
                 log.error(
-                    f"  Quota exceeded or forbidden on year {year}: {e}\n"
-                    f"  search.list daily cap (100/day) may be exhausted — "
-                    f"stopping early. Re-run tomorrow after PT midnight reset."
+                    f"  Quota exceeded on year {year} (page {pages_fetched + 1}): {e}\n"
+                    f"  search.list daily cap (100/day) likely exhausted."
                 )
-                raise
-            log.warning(f"  HTTP error on year {year}: {e}")
+                raise QuotaExceededError(
+                    f"Quota exceeded while fetching year {year}, "
+                    f"page {pages_fetched + 1}. {len(items)} partial items "
+                    f"collected for this year are DISCARDED — re-run after "
+                    f"the next midnight Pacific Time reset to get a clean "
+                    f"year. Already-completed years are unaffected if you "
+                    f"used --resume (see checkpoint file)."
+                ) from e
+
+            # Non-quota error mid-pagination (e.g. 500, network blip).
+            # This year is now suspect — mark it rather than pretend it's done.
+            status = "partial_error"
+            note = f"Stopped at page {pages_fetched + 1} due to: {e}"
+            log.warning(f"  Year {year}: {note}")
             break
 
         pages_fetched += 1
@@ -136,19 +201,29 @@ def search_year(youtube, year: int) -> list[dict]:
         page_token = response.get("nextPageToken")
         total_results = response.get("pageInfo", {}).get("totalResults", 0)
 
-        if not page_token or len(items) >= MAX_PER_YEAR:
-            if total_results > MAX_PER_YEAR:
-                log.warning(
-                    f"  Year {year}: totalResults={total_results} exceeds "
-                    f"the ~{MAX_PER_YEAR} reliable ceiling — treat this "
-                    f"year's count as a floor, not exact."
-                )
+        if len(items) >= MAX_PER_YEAR:
+            status = "capped"
+            note = (f"Hit the {MAX_PER_YEAR}-result ceiling "
+                    f"(totalResults reported as {total_results}) — "
+                    f"treat this year's count as a floor, not exact.")
+            log.warning(f"  Year {year}: {note}")
+            break
+
+        if not page_token:
+            # Normal completion — every page walked, no errors.
             break
 
         time.sleep(SLEEP_SEC)
 
-    log.info(f"  Year {year}: {len(items)} videos found ({pages_fetched} search.list call(s))")
-    return items
+    log.info(f"  Year {year}: {len(items)} videos, status={status} "
+             f"({pages_fetched} search.list call(s))")
+
+    return {
+        "items": items,
+        "status": status,
+        "pages_fetched": pages_fetched,
+        "note": note,
+    }
 
 
 def attach_statistics(youtube, videos: list[dict]) -> list[dict]:
@@ -187,67 +262,184 @@ def attach_statistics(youtube, videos: list[dict]) -> list[dict]:
     return list(by_id.values())
 
 
-def fetch_all() -> pd.DataFrame:
+# ── checkpoint helpers ──────────────────────────────────────────────────────
+# Tracks which years are done so a quota cutoff doesn't force re-fetching
+# years that already completed cleanly.
+
+CHECKPOINT_FILE = "youtube_year_status.csv"
+
+
+def load_checkpoint() -> dict:
+    """Returns {year: status} for years already attempted in a prior run."""
+    path = DATA_DIR / CHECKPOINT_FILE
+    if not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    return dict(zip(df["year"], df["status"]))
+
+
+def save_checkpoint(year_status: dict, year_notes: dict):
+    df = pd.DataFrame([
+        {"year": y, "status": s, "note": year_notes.get(y, "")}
+        for y, s in sorted(year_status.items())
+    ])
+    df.to_csv(DATA_DIR / CHECKPOINT_FILE, index=False, encoding="utf-8-sig")
+
+
+def fetch_all(resume: bool = True) -> tuple[pd.DataFrame, dict, dict]:
     youtube = build_client()
     years = list(range(START_YEAR, END_YEAR + 1))
-    log.info(f"Fetching YouTube data for {len(years)} years ({START_YEAR}–{END_YEAR})")
-    log.info(f"Estimated search.list calls: ~{len(years)}–{len(years)*2} "
-              f"(well under the 100/day cap)")
+
+    prior_status = load_checkpoint() if resume else {}
+    already_done = {
+        y for y, s in prior_status.items()
+        if s in ("complete", "capped") and y in years
+    }
+    if already_done:
+        log.info(f"Resuming: {len(already_done)} year(s) already completed "
+                  f"in a prior run will be skipped: {sorted(already_done)}")
+
+    years_to_fetch = [y for y in years if y not in already_done]
+    log.info(f"Fetching YouTube data for {len(years_to_fetch)} year(s): "
+             f"{years_to_fetch}")
+    log.info(f"Estimated search.list calls: ~{len(years_to_fetch)}–"
+              f"{len(years_to_fetch)*2} (well under the 100/day cap)")
 
     all_videos = []
-    for year in years:
-        videos = search_year(youtube, year)
-        all_videos.extend(videos)
+    year_status = dict(prior_status)
+    year_notes  = {}
 
-    log.info(f"Total videos found: {len(all_videos)} — attaching statistics…")
+    # If resuming, we still need the previously-collected videos for
+    # completed years — but this script writes the raw video CSV fresh
+    # each run, so completed years must be re-loaded from the prior raw
+    # output rather than re-fetched (re-fetching would burn quota for no
+    # reason). Load them if available.
+    if already_done:
+        prior_csv = DATA_DIR / "youtube_kimchi_videos.csv"
+        if prior_csv.exists():
+            prior_df = pd.read_csv(prior_csv)
+            prior_df = prior_df[prior_df["year"].isin(already_done)]
+            all_videos.extend(prior_df.to_dict("records"))
+            log.info(f"  Reloaded {len(prior_df)} videos from prior raw "
+                     f"output for completed years.")
+        else:
+            log.warning("  No prior raw CSV found to reload completed "
+                        "years from — those years will show 0 videos "
+                        "unless re-fetched. Consider running with "
+                        "resume=False.")
+
+    try:
+        for year in years_to_fetch:
+            result = search_year(youtube, year)
+            all_videos.extend(result["items"])
+            year_status[year] = result["status"]
+            year_notes[year]  = result["note"]
+            # checkpoint after every year so a later quota error doesn't
+            # lose progress on years already completed in THIS run
+            save_checkpoint(year_status, year_notes)
+    except QuotaExceededError as e:
+        log.error(f"\nStopping run early: {e}")
+        # any year in years_to_fetch not yet in year_status was never
+        # reached this run — record that explicitly so it's visible in
+        # the output rather than just absent
+        for year in years_to_fetch:
+            if year not in year_status:
+                year_status[year] = "not_attempted"
+                year_notes[year]  = "Quota ran out before this year was reached."
+        save_checkpoint(year_status, year_notes)
+        log.info(f"Checkpoint saved — re-run the script later to pick up "
+                 f"remaining years automatically.")
+        # fall through and save whatever was collected so far, clearly
+        # flagged via year_status, rather than losing it entirely
+
+    log.info(f"Total videos in hand: {len(all_videos)} — attaching statistics…")
     all_videos = attach_statistics(youtube, all_videos)
 
     df = pd.DataFrame(all_videos)
+    if not df.empty:
+        df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
+        df["year"] = df["published_at"].dt.year
+        df["url"] = "https://youtube.com/watch?v=" + df["video_id"]
+        df = df.sort_values("published_at").reset_index(drop=True)
+
+    return df, year_status, year_notes
+
+
+def build_yearly_volume(df: pd.DataFrame, year_status: dict, year_notes: dict) -> pd.DataFrame:
+    """Aggregate to year-level counts and attach the reliability status —
+    the plotting-ready file, with no silent ambiguity about which years
+    are trustworthy."""
     if df.empty:
-        return df
-
-    df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
-    df["year"] = df["published_at"].dt.year
-    df["url"] = "https://youtube.com/watch?v=" + df["video_id"]
-    df = df.sort_values("published_at").reset_index(drop=True)
-
-    return df
-
-
-def build_yearly_volume(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate to year-level counts — the plotting-ready file."""
-    yearly = (
-        df.groupby("year")
-        .agg(
-            video_count   = ("video_id", "count"),
-            total_views   = ("view_count", "sum"),
-            total_likes   = ("like_count", "sum"),
-            total_comments= ("comment_count", "sum"),
+        yearly = pd.DataFrame(columns=[
+            "year", "video_count", "total_views", "total_likes",
+            "total_comments", "status", "note"
+        ])
+    else:
+        yearly = (
+            df.groupby("year")
+            .agg(
+                video_count    = ("video_id", "count"),
+                total_views    = ("view_count", "sum"),
+                total_likes    = ("like_count", "sum"),
+                total_comments = ("comment_count", "sum"),
+            )
+            .reset_index()
         )
-        .reset_index()
+
+    # years that were attempted but produced zero rows (e.g. quota hit on
+    # page 1) still need a row so the gap is visible, not silently absent
+    all_attempted_years = sorted(year_status.keys())
+    existing_years = yearly["year"].tolist()
+    full_index = sorted(set(all_attempted_years) | set(existing_years))
+    yearly = yearly.set_index("year").reindex(full_index).reset_index()
+    yearly[["video_count", "total_views", "total_likes", "total_comments"]] = (
+        yearly[["video_count", "total_views", "total_likes", "total_comments"]].fillna(0)
     )
+
+    yearly["status"] = yearly["year"].map(year_status).fillna("not_attempted")
+    yearly["note"]   = yearly["year"].map(year_notes).fillna("")
+
     return yearly
 
 
 def main():
-    df = fetch_all()
+    import sys
+    fresh = "--fresh" in sys.argv  # ignore checkpoint, re-fetch everything
 
-    if df.empty:
+    df, year_status, year_notes = fetch_all(resume=not fresh)
+
+    if df.empty and not year_status:
         log.warning("No data fetched — check your API key and quota status.")
         return
 
     save_csv(df, "youtube_kimchi_videos.csv", "YouTube kimchi videos (raw)")
 
-    yearly = build_yearly_volume(df)
-    save_csv(yearly, "youtube_kimchi_yearly_volume.csv", "YouTube kimchi yearly volume (aggregated)")
+    yearly = build_yearly_volume(df, year_status, year_notes)
+    save_csv(yearly, "youtube_kimchi_yearly_volume.csv",
+             "YouTube kimchi yearly volume (aggregated, status-flagged)")
 
     print(f"\nTotal videos collected: {len(df):,}")
-    print(f"\nVideos per year:")
-    print(yearly.to_string(index=False))
+    print(f"\nYearly volume with reliability status:")
+    print(yearly[["year", "video_count", "status"]].to_string(index=False))
 
-    print(f"\nTop 10 videos by view count:")
-    top10 = df.nlargest(10, "view_count")[["title", "channel_title", "year", "view_count"]]
-    print(top10.to_string(index=False))
+    unreliable = yearly[yearly["status"].isin(["capped", "partial_error", "not_attempted"])]
+    if not unreliable.empty:
+        print(f"\n⚠ {len(unreliable)} year(s) are NOT safe to plot as exact "
+              f"counts — see the 'status' and 'note' columns:")
+        print(unreliable[["year", "video_count", "status", "note"]].to_string(index=False))
+        print(
+            "\n'capped'        → hit the 500-result ceiling; true count is higher\n"
+            "'partial_error' → pagination stopped early due to a non-quota error;\n"
+            "                  re-run with --fresh, or delete that year's checkpoint\n"
+            "                  row in data/youtube_year_status.csv to retry it\n"
+            "'not_attempted' → quota ran out before this year was reached;\n"
+            "                  just run the script again to pick up from here"
+        )
+
+    if not df.empty:
+        print(f"\nTop 10 videos by view count:")
+        top10 = df.nlargest(10, "view_count")[["title", "channel_title", "year", "view_count"]]
+        print(top10.to_string(index=False))
 
 
 if __name__ == "__main__":
