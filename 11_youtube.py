@@ -404,7 +404,17 @@ def fetch_all(resume: bool = True) -> tuple[pd.DataFrame, dict, dict]:
 
     df = pd.DataFrame(all_videos)
     if not df.empty:
-        df["published_at"] = pd.to_datetime(df["published_at"], utc=True)
+        # format='mixed' is required here because resumed runs combine two
+        # different timestamp string formats in the same column: videos
+        # reloaded from a prior CSV write come back as
+        # "2022-12-31 19:42:35+00:00" (pandas' own round-trip format),
+        # while freshly-fetched videos from this run are still raw
+        # YouTube API strings like "2022-12-31T19:42:35Z". Without
+        # format='mixed', pandas locks onto whichever format the first
+        # row uses and raises a ValueError the moment it hits a row in
+        # the other format — which is exactly what happened here, right
+        # at the boundary between reloaded and freshly-fetched rows.
+        df["published_at"] = pd.to_datetime(df["published_at"], utc=True, format="mixed")
         df["year"] = df["published_at"].dt.year
         df["url"] = "https://youtube.com/watch?v=" + df["video_id"]
         df = df.sort_values("published_at").reset_index(drop=True)
